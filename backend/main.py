@@ -198,8 +198,35 @@ async def add_to_portfolio(stock: PortfolioStock):
 async def remove_from_portfolio(symbol: str):
     """Remove stock from portfolio"""
     try:
-        await firebase_client.remove_portfolio_stock(symbol.upper())
-        return {"message": f"Removed {symbol} from portfolio"}
+        symbol_upper = symbol.upper()
+
+        # Remove from portfolio
+        await firebase_client.remove_portfolio_stock(symbol_upper)
+
+        # Also clean up any exit signals for this stock
+        if firebase_client.db:
+            try:
+                exit_ref = firebase_client.db.collection('exit_signals')
+                docs = exit_ref.where('symbol', '==', symbol_upper).stream()
+
+                batch = firebase_client.db.batch()
+                count = 0
+                for doc in docs:
+                    batch.delete(doc.reference)
+                    count += 1
+
+                if count > 0:
+                    batch.commit()
+                    logger.info(f"Cleaned up {count} exit signals for {symbol_upper}")
+
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to cleanup exit signals for {symbol_upper}: {cleanup_error}")
+
+        return {
+            "message": f"Removed {symbol} from portfolio and cleaned up exit signals",
+            "symbol": symbol_upper
+        }
+
     except Exception as e:
         logger.error(f"Error removing from portfolio: {e}")
         raise HTTPException(status_code=500, detail="Failed to remove from portfolio")
@@ -419,6 +446,72 @@ async def background_portfolio_monitor_once():
     except Exception as e:
         logger.error(f"Manual portfolio monitor error: {e}")
 
+
+# Debug endpoint
+@app.get("/debug/market-time")
+async def debug_market_time():
+    """Debug what time the system thinks it is"""
+    import pytz
+    monitor = PortfolioMonitor()
+
+    utc_now = datetime.utcnow()
+    et_tz = pytz.timezone('US/Eastern')
+    et_now = datetime.now(et_tz)
+
+    is_market = monitor.is_market_hours()
+
+    return {
+        "utc_time": utc_now.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "et_time": et_now.strftime("%Y-%m-%d %H:%M:%S ET"),
+        "et_hour": et_now.hour,
+        "et_minute": et_now.minute,
+        "weekday": et_now.weekday(),
+        "is_weekend": et_now.weekday() >= 5,
+        "is_market_hours": is_market,
+        "market_should_be_open": (9.5 <= (et_now.hour + et_now.minute / 60) <= 16) and et_now.weekday() < 5
+    }
+
+
+@app.post("/api/portfolio/cleanup-exit-signals")
+async def cleanup_orphaned_exit_signals():
+    """Remove exit signals for stocks not in portfolio"""
+    try:
+        # Get current portfolio symbols
+        portfolio = await firebase_client.get_portfolio()
+        portfolio_symbols = {stock['symbol'] for stock in portfolio}
+
+        if not firebase_client.db:
+            return {"message": "Firebase not available"}
+
+        # Get all exit signals
+        exit_ref = firebase_client.db.collection('exit_signals')
+        docs = exit_ref.stream()
+
+        batch = firebase_client.db.batch()
+        removed_count = 0
+
+        for doc in docs:
+            data = doc.to_dict()
+            symbol = data.get('symbol', '')
+
+            # If this exit signal is for a stock not in portfolio, remove it
+            if symbol not in portfolio_symbols:
+                batch.delete(doc.reference)
+                removed_count += 1
+                logger.info(f"Marking orphaned exit signal for removal: {symbol}")
+
+        if removed_count > 0:
+            batch.commit()
+
+        return {
+            "message": f"Cleaned up {removed_count} orphaned exit signals",
+            "portfolio_symbols": list(portfolio_symbols),
+            "removed_count": removed_count
+        }
+
+    except Exception as e:
+        logger.error(f"Error cleaning up exit signals: {e}")
+        return {"error": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run(

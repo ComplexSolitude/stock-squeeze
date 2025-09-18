@@ -103,19 +103,20 @@ async function apiRequest(endpoint, options = {}) {
     }
 }
 
-// Portfolio Management
 function loadPortfolio() {
     const portfolioList = document.getElementById('portfolio-list');
     portfolioList.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
 
-    // Load from Firebase (real-time updates)
+    // Load portfolio from Firebase
     db.collection('portfolio').onSnapshot((snapshot) => {
         portfolioStocks = [];
         snapshot.forEach((doc) => {
             portfolioStocks.push({ id: doc.id, ...doc.data() });
         });
 
-        renderPortfolio();
+        // Also load exit signals for portfolio view
+        loadSellSignalsForPortfolio();
+
     }, (error) => {
         console.error('Error loading portfolio:', error);
         portfolioList.innerHTML = `
@@ -124,6 +125,24 @@ function loadPortfolio() {
                 <p>Please check your connection and try again</p>
             </div>
         `;
+    });
+}
+
+// Add this new function
+function loadSellSignalsForPortfolio() {
+    // Load exit signals for portfolio display
+    db.collection('exit_signals').onSnapshot((snapshot) => {
+        sellSignals = [];
+        snapshot.forEach((doc) => {
+            sellSignals.push({ id: doc.id, ...doc.data() });
+        });
+
+        // Render portfolio with exit signals
+        renderPortfolio();
+    }, (error) => {
+        console.error('Error loading exit signals for portfolio:', error);
+        // Still render portfolio even if exit signals fail
+        renderPortfolio();
     });
 }
 
@@ -140,48 +159,111 @@ function renderPortfolio() {
         return;
     }
 
-    portfolioList.innerHTML = portfolioStocks.map(stock => `
-        <div class="stock-card">
-            <div class="stock-header">
-                <div>
-                    <div class="stock-symbol">${stock.symbol}</div>
-                    <div class="stock-price ${stock.change_percent >= 0 ? 'positive' : 'negative'}">
-                        $${stock.price?.toFixed(2) || 'Loading...'}
+    portfolioList.innerHTML = portfolioStocks.map(stock => {
+        // Find exit signal for this stock
+        const exitSignal = sellSignals.find(signal => signal.symbol === stock.symbol);
+
+        // Determine exit status
+        let exitStatus = '';
+        if (exitSignal) {
+            const urgency = exitSignal.urgency || 0;
+            if (urgency >= 90) {
+                exitStatus = `
+                    <div class="exit-status critical">
+                        🚨 SELL NOW
+                        <div class="exit-details">Urgency: ${urgency}/100</div>
+                    </div>
+                `;
+            } else if (urgency >= 80) {
+                exitStatus = `
+                    <div class="exit-status high">
+                        🔴 SELL SOON
+                        <div class="exit-details">Urgency: ${urgency}/100</div>
+                    </div>
+                `;
+            } else if (urgency >= 70) {
+                exitStatus = `
+                    <div class="exit-status medium">
+                        ⚠️ PREPARE
+                        <div class="exit-details">Urgency: ${urgency}/100</div>
+                    </div>
+                `;
+            } else if (urgency >= 60) {
+                exitStatus = `
+                    <div class="exit-status low">
+                        👀 MONITOR
+                        <div class="exit-details">Urgency: ${urgency}/100</div>
+                    </div>
+                `;
+            } else {
+                exitStatus = `
+                    <div class="exit-status hold">
+                        ✅ HOLD
+                        <div class="exit-details">No exit signals</div>
+                    </div>
+                `;
+            }
+        } else {
+            exitStatus = `
+                <div class="exit-status hold">
+                    ✅ HOLD
+                    <div class="exit-details">No exit signals</div>
+                </div>
+            `;
+        }
+
+        return `
+            <div class="stock-card">
+                <div class="stock-header">
+                    <div>
+                        <div class="stock-symbol">${stock.symbol}</div>
+                        <div class="stock-price ${stock.change_percent >= 0 ? 'positive' : 'negative'}">
+                            $${stock.price?.toFixed(2) || 'Loading...'}
+                        </div>
+                    </div>
+                    <div class="stock-change ${stock.change_percent >= 0 ? 'positive' : 'negative'}">
+                        ${stock.change_percent >= 0 ? '+' : ''}${stock.change_percent?.toFixed(2) || '0.00'}%
                     </div>
                 </div>
-                <div class="stock-change ${stock.change_percent >= 0 ? 'positive' : 'negative'}">
-                    ${stock.change_percent >= 0 ? '+' : ''}${stock.change_percent?.toFixed(2) || '0.00'}%
+                
+                ${exitStatus}
+                
+                <div class="stock-info">
+                    <div>
+                        <strong>Volume:</strong> ${formatNumber(stock.volume || 0)}
+                    </div>
+                    <div>
+                        <strong>Avg Vol:</strong> ${formatNumber(stock.avg_volume || 0)}
+                    </div>
+                    <div>
+                        <strong>Market Cap:</strong> ${formatMarketCap(stock.market_cap || 0)}
+                    </div>
+                    <div>
+                        <strong>Float:</strong> ${formatNumber(stock.float_shares || 0)}
+                    </div>
                 </div>
+                
+                ${stock.squeeze_score ? `
+                    <div class="squeeze-score">
+                        <strong>Squeeze Score: ${stock.squeeze_score}/100</strong>
+                        ${stock.squeeze_score >= 70 ? '<span class="high-potential"> 🚨 HIGH POTENTIAL</span>' : ''}
+                    </div>
+                ` : ''}
+                
+                ${exitSignal ? `
+                    <div class="exit-signal-details">
+                        <strong>Exit Signals:</strong>
+                        ${exitSignal.exit_signals?.map(s => `<div>• ${s.message}</div>`).join('') || 'General exit indicators'}
+                    </div>
+                ` : ''}
+                
+                <button onclick="removeFromPortfolio('${stock.id}')" 
+                        style="margin-top: 10px; background: #ff4757; color: var(--dark); border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer;">
+                    Remove
+                </button>
             </div>
-            
-            <div class="stock-info">
-                <div>
-                    <strong>Volume:</strong> ${formatNumber(stock.volume || 0)}
-                </div>
-                <div>
-                    <strong>Avg Vol:</strong> ${formatNumber(stock.avg_volume || 0)}
-                </div>
-                <div>
-                    <strong>Market Cap:</strong> ${formatMarketCap(stock.market_cap || 0)}
-                </div>
-                <div>
-                    <strong>Float:</strong> ${formatNumber(stock.float_shares || 0)}
-                </div>
-            </div>
-            
-            ${stock.squeeze_score ? `
-                <div style="margin-top: 15px; padding: 10px; background: #f8f9fa; border-radius: 8px;">
-                    <strong>Squeeze Score: ${stock.squeeze_score}/100</strong>
-                    ${stock.squeeze_score >= 70 ? '<span style="color: var(--danger)"> 🚨 HIGH POTENTIAL</span>' : ''}
-                </div>
-            ` : ''}
-            
-            <button onclick="removeFromPortfolio('${stock.id}')" 
-                    style="margin-top: 10px; background: #ff4757; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer;">
-                Remove
-            </button>
-        </div>
-    `).join('');
+        `;
+    }).join('');
 }
 
 // Stock Search and Add
@@ -307,6 +389,14 @@ async function removeFromPortfolio(stockId) {
             });
 
             showNotification('Stock removed from portfolio', 'success');
+
+            // Refresh sell signals to remove any exit signals for this stock
+            if (document.getElementById('sell').classList.contains('active')) {
+                setTimeout(() => {
+                    loadSellSignals();
+                }, 1000); // Give backend time to clean up
+            }
+
         } catch (error) {
             console.error('Error removing stock:', error);
             showNotification('Error removing stock', 'error');
@@ -349,7 +439,7 @@ function renderBuySignals() {
             <div class="empty-state">
                 <h3>No squeeze opportunities detected</h3>
                 <p>Our AI is scanning the market for opportunities</p>
-                <button onclick="manualSqueezeScan()" style="margin-top: 15px; background: var(--primary); color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">
+                <button onclick="manualSqueezeScan()" style="margin-top: 15px; background: var(--primary); color: var(--dark); border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">
                     🔍 Manual Scan
                 </button>
             </div>
@@ -443,39 +533,25 @@ function loadSellSignals() {
     const sellSignalsContainer = document.getElementById('sell-signals');
     sellSignalsContainer.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
 
-    // TEMPORARILY DISABLED: Load from API instead of Firebase to avoid cached data
-    // Load from backend API instead
-    apiRequest('/api/exit-signals', { method: 'GET' })
-        .then(response => {
-            sellSignals = response.exit_signals || [];
-            console.log('📊 Loaded exit signals from API:', sellSignals);
-            renderSellSignals();
-        })
-        .catch(error => {
-            console.error('Error loading sell signals from API:', error);
-            // Force empty signals to prevent false alerts
-            sellSignals = [];
-            renderSellSignals();
-        });
+    // Load from Firebase with real-time updates
+    db.collection('exit_signals')
+      .orderBy('urgency', 'desc')
+      .onSnapshot((snapshot) => {
+          sellSignals = [];
+          snapshot.forEach((doc) => {
+              sellSignals.push({ id: doc.id, ...doc.data() });
+          });
 
-    // OLD Firebase code (commented out to prevent cached data):
-    // db.collection('exit_signals')
-    //   .orderBy('urgency', 'desc')
-    //   .onSnapshot((snapshot) => {
-    //       sellSignals = [];
-    //       snapshot.forEach((doc) => {
-    //           sellSignals.push({ id: doc.id, ...doc.data() });
-    //       });
-    //       renderSellSignals();
-    //   }, (error) => {
-    //       console.error('Error loading sell signals:', error);
-    //       sellSignalsContainer.innerHTML = `
-    //           <div class="empty-state">
-    //               <h3>Error loading exit signals</h3>
-    //               <p>Please check your connection</p>
-    //           </div>
-    //       `;
-    //   });
+          renderSellSignals();
+      }, (error) => {
+          console.error('Error loading sell signals:', error);
+          sellSignalsContainer.innerHTML = `
+              <div class="empty-state">
+                  <h3>Error loading exit signals</h3>
+                  <p>Please check your connection</p>
+              </div>
+          `;
+      });
 }
 
 function renderSellSignals() {
@@ -486,7 +562,7 @@ function renderSellSignals() {
             <div class="empty-state">
                 <h3>No exit signals</h3>
                 <p>Your portfolio positions are holding strong</p>
-                <button onclick="manualPortfolioMonitor()" style="margin-top: 15px; background: var(--primary); color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">
+                <button onclick="manualPortfolioMonitor()" style="margin-top: 15px; background: var(--primary); color: var(--dark); border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">
                     🔍 Check Portfolio
                 </button>
             </div>

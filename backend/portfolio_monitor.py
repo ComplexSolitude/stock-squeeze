@@ -108,18 +108,20 @@ class PortfolioMonitor:
     def is_market_hours(self) -> bool:
         """Check if market is currently open"""
         try:
-            # TEMPORARY FIX: Force after-hours mode to prevent false sell signals
-            logger.info("🌙 FORCED AFTER-HOURS MODE - preventing false sell signals during squeeze")
-            return False
+            now_et = datetime.now(self.market_timezone)
 
-            # Original market hours logic (will re-enable later):
-            # now_et = datetime.now(self.market_timezone)
-            # if now_et.weekday() >= 5:  # Weekend
-            #     return False
-            # hour = now_et.hour
-            # minute = now_et.minute
-            # current_time = hour + (minute / 60)
-            # return 9.5 <= current_time <= 16  # 9:30 AM - 4:00 PM
+            # Market hours: 9:30 AM - 4:00 PM ET, Monday-Friday
+            if now_et.weekday() >= 5:  # Weekend
+                return False
+
+            hour = now_et.hour
+            minute = now_et.minute
+            current_time = hour + (minute / 60)
+
+            logger.info(
+                f"Market hours check: ET time {hour:02d}:{minute:02d} ({current_time:.1f}), Market hours: 9.5-16.0")
+
+            return 9.5 <= current_time <= 16  # 9:30 AM - 4:00 PM
 
         except Exception as e:
             logger.error(f"Error checking market hours: {e}")
