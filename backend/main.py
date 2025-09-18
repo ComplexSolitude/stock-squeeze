@@ -35,7 +35,7 @@ app.add_middleware(
 )
 
 # Serve static files (your PWA)
-app.mount("/static", StaticFiles(directory="frontend"), name="static")
+app.mount("/static", StaticFiles(directory="../frontend"), name="static")
 
 # Initialize components
 stock_fetcher = StockDataFetcher()

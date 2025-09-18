@@ -20,9 +20,8 @@ class FirebaseClient:
             # Check if Firebase is already initialized
             if not firebase_admin._apps:
                 # Try to get credentials from environment or file
-                cred_path = os.getenv('FIREBASE_CREDENTIALS_PATH')
-
-                if cred_path and os.path.exists(cred_path):
+                cred_path = "firebase-key.json"  # Your actual filename
+                if os.path.exists(cred_path):
                     # Use service account file
                     cred = credentials.Certificate(cred_path)
                     firebase_admin.initialize_app(cred)
