@@ -1,12 +1,13 @@
-// Firebase Configuration
+// Your web app's Firebase configuration
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
 const firebaseConfig = {
-    // Replace with your Firebase config
-    apiKey: "your-api-key",
-    authDomain: "your-project.firebaseapp.com",
-    projectId: "your-project-id",
-    storageBucket: "your-project.appspot.com",
-    messagingSenderId: "123456789",
-    appId: "your-app-id"
+  apiKey: "AIzaSyCm3FsyVAxC1SYe_sejESmeS1-vy4q-uVM",
+  authDomain: "stock-squeeze.firebaseapp.com",
+  projectId: "stock-squeeze",
+  storageBucket: "stock-squeeze.firebasestorage.app",
+  messagingSenderId: "734654542484",
+  appId: "1:734654542484:web:5f03f50e13ee909b0aba81",
+  measurementId: "G-3WZCPP0333"
 };
 
 // Initialize Firebase
