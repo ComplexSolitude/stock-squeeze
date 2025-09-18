@@ -4,9 +4,8 @@ const urlsToCache = [
   '/index.html',
   '/styles.css',
   '/app.js',
-  '/manifest.json',
-  '/icon-192x192.png',
-  '/icon-512x512.png'
+  '/manifest.json'
+  // Remove icon references until you have the actual files
 ];
 
 // Install event
@@ -15,13 +14,25 @@ self.addEventListener('install', function(event) {
     caches.open(CACHE_NAME)
       .then(function(cache) {
         console.log('Opened cache');
-        return cache.addAll(urlsToCache);
+        // Try to add files, but don't fail if some are missing
+        return Promise.allSettled(
+          urlsToCache.map(url => cache.add(url))
+        );
+      })
+      .then(() => {
+        console.log('Cache setup complete');
+        self.skipWaiting(); // Activate immediately
       })
   );
 });
 
 // Fetch event
 self.addEventListener('fetch', function(event) {
+  // Only handle GET requests
+  if (event.request.method !== 'GET') {
+    return;
+  }
+
   event.respondWith(
     caches.match(event.request)
       .then(function(response) {
@@ -29,7 +40,12 @@ self.addEventListener('fetch', function(event) {
         if (response) {
           return response;
         }
-        return fetch(event.request);
+        return fetch(event.request).catch(() => {
+          // Return offline page for navigation requests
+          if (event.request.destination === 'document') {
+            return caches.match('/index.html');
+          }
+        });
       }
     )
   );
@@ -46,6 +62,8 @@ self.addEventListener('activate', function(event) {
           }
         })
       );
+    }).then(() => {
+      return self.clients.claim();
     })
   );
 });
@@ -55,7 +73,7 @@ self.addEventListener('push', function(event) {
   const options = {
     body: event.data ? event.data.text() : 'New squeeze opportunity detected!',
     icon: '/icon-192x192.png',
-    badge: '/icon-72x72.png',
+    badge: '/icon-192x192.png', // Use same icon as badge for now
     vibrate: [200, 100, 200],
     data: {
       dateOfArrival: Date.now(),
@@ -64,13 +82,11 @@ self.addEventListener('push', function(event) {
     actions: [
       {
         action: 'explore',
-        title: 'View Details',
-        icon: '/icon-192x192.png'
+        title: 'View Details'
       },
       {
         action: 'close',
-        title: 'Close',
-        icon: '/icon-192x192.png'
+        title: 'Close'
       }
     ]
   };

@@ -5,14 +5,94 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 import logging
 from collections import deque
+import pytz
+import aiohttp
+import re
 
 logger = logging.getLogger(__name__)
+
+
+class AfterHoursDataProvider:
+    def __init__(self):
+        self.session = None
+        self.market_timezone = pytz.timezone('US/Eastern')
+
+    async def get_session(self):
+        if self.session is None:
+            self.session = aiohttp.ClientSession()
+        return self.session
+
+    def is_after_hours(self) -> bool:
+        """Check if it's currently after-hours trading"""
+        now_et = datetime.now(self.market_timezone)
+
+        if now_et.weekday() >= 5:  # Weekend
+            return True
+
+        hour = now_et.hour
+        minute = now_et.minute
+        current_time = hour + (minute / 60)
+
+        # Market hours: 9:30 AM - 4:00 PM ET
+        return not (9.5 <= current_time <= 16)
+
+    async def get_after_hours_price(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Get after-hours price by scraping Yahoo Finance"""
+        try:
+            session = await self.get_session()
+
+            url = f"https://finance.yahoo.com/quote/{symbol}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+
+            async with session.get(url, headers=headers) as response:
+                if response.status == 200:
+                    html = await response.text()
+
+                    # Look for after-hours price
+                    regular_pattern = r'"regularMarketPrice":\{"raw":([\d.]+)'
+                    after_hours_pattern = r'"postMarketPrice":\{"raw":([\d.]+)'
+                    change_pattern = r'"postMarketChange":\{"raw":(-?[\d.]+)'
+
+                    regular_match = re.search(regular_pattern, html)
+                    after_hours_match = re.search(after_hours_pattern, html)
+                    change_match = re.search(change_pattern, html)
+
+                    if after_hours_match and regular_match:
+                        after_hours_price = float(after_hours_match.group(1))
+                        regular_price = float(regular_match.group(1))
+                        change = float(change_match.group(1)) if change_match else (after_hours_price - regular_price)
+                        change_percent = (change / regular_price * 100) if regular_price > 0 else 0
+
+                        return {
+                            'symbol': symbol,
+                            'price': after_hours_price,
+                            'regular_price': regular_price,
+                            'change': change,
+                            'change_percent': change_percent,
+                            'timestamp': int(datetime.now().timestamp()),
+                            'source': 'yahoo_after_hours',
+                            'after_hours': True
+                        }
+
+        except Exception as e:
+            logger.warning(f"After-hours data error for {symbol}: {e}")
+
+        return None
+
+    async def close_session(self):
+        if self.session:
+            await self.session.close()
+            self.session = None
 
 
 class PortfolioMonitor:
     def __init__(self):
         self.price_history = {}
         self.volume_history = {}
+        self.market_timezone = pytz.timezone('US/Eastern')
+        self.after_hours_provider = AfterHoursDataProvider()
 
         # TIGHTER exit thresholds - protect gains better
         self.exit_thresholds = {
@@ -25,11 +105,29 @@ class PortfolioMonitor:
             'profit_protection_3': {'gain': 25, 'drop': 10}  # 25%+ gains, 10% drop
         }
 
+    def is_market_hours(self) -> bool:
+        """Check if market is currently open"""
+        try:
+            # TEMPORARY FIX: Force after-hours mode to prevent false sell signals
+            logger.info("🌙 FORCED AFTER-HOURS MODE - preventing false sell signals during squeeze")
+            return False
+
+            # Original market hours logic (will re-enable later):
+            # now_et = datetime.now(self.market_timezone)
+            # if now_et.weekday() >= 5:  # Weekend
+            #     return False
+            # hour = now_et.hour
+            # minute = now_et.minute
+            # current_time = hour + (minute / 60)
+            # return 9.5 <= current_time <= 16  # 9:30 AM - 4:00 PM
+
+        except Exception as e:
+            logger.error(f"Error checking market hours: {e}")
+            return False
+
     async def get_exit_signals(self) -> List[Dict[str, Any]]:
         """Get exit signals for all portfolio positions"""
         try:
-            # This would normally get portfolio from Firebase
-            # For now, we'll use a placeholder that can be overridden
             portfolio_stocks = []  # Will be populated by Firebase client
 
             exit_signals = []
@@ -55,18 +153,23 @@ class PortfolioMonitor:
 
     async def analyze_stock_exit(self, symbol: str, avg_price: Optional[float] = None,
                                  quantity: float = 0) -> Optional[Dict[str, Any]]:
-        """Analyze individual stock for exit signals with TIGHT stops"""
+        """Analyze stock for exit signals - handles both market hours and after-hours"""
+
+        # Check if it's after-hours
+        if not self.is_market_hours():
+            logger.info(f"⏰ After-hours: Using specialized analysis for {symbol}")
+            return await self._analyze_after_hours_exit(symbol, avg_price, quantity)
+
+        # Regular market hours analysis
         try:
-            # Get real-time data with 1-minute intervals
             ticker = yf.Ticker(symbol)
             hist = ticker.history(period="1d", interval="1m")
 
             if hist.empty or len(hist) < 10:
+                logger.warning(f"Insufficient data for {symbol}")
                 return None
 
             current_price = float(hist['Close'].iloc[-1])
-
-            # Find recent high (last 60 minutes)
             recent_high = hist['High'].tail(60).max()
             recent_volume = hist['Volume'].tail(30)
 
@@ -83,45 +186,45 @@ class PortfolioMonitor:
 
             # 1. QUICK DROP CHECK (8% not 50%!)
             if drop_from_high >= (self.exit_thresholds['quick_drop'] * 100):
-                urgency = 95
-                exit_signals.append({
-                    'type': 'quick_drop',
-                    'message': f'🚨 QUICK DROP: Down {drop_from_high:.1f}% from recent high',
-                    'urgency': urgency,
-                    'action': 'SELL IMMEDIATELY'
-                })
-                max_urgency = max(max_urgency, urgency)
+                # Double-check with recent trend
+                last_5_candles = hist['Close'].tail(5)
+                if len(last_5_candles) >= 3:
+                    recent_trend = (last_5_candles.iloc[-1] - last_5_candles.iloc[-3]) / last_5_candles.iloc[-3]
 
-            # 2. VOLUME EXHAUSTION (40% drop threshold, not 70%)
+                    if recent_trend < -0.05:  # Confirmed 5% drop in last 3 candles
+                        urgency = 95
+                        exit_signals.append({
+                            'type': 'quick_drop',
+                            'message': f'🚨 QUICK DROP: Down {drop_from_high:.1f}% from recent high',
+                            'urgency': urgency,
+                            'action': 'SELL IMMEDIATELY'
+                        })
+                        max_urgency = max(max_urgency, urgency)
+
+            # 2. VOLUME EXHAUSTION
             volume_signal = self._check_volume_exhaustion(hist)
             if volume_signal:
                 exit_signals.append(volume_signal)
                 max_urgency = max(max_urgency, volume_signal['urgency'])
 
-            # 3. MOMENTUM REVERSAL (5% threshold)
+            # 3. MOMENTUM REVERSAL
             momentum_signal = self._check_momentum_reversal(hist)
             if momentum_signal:
                 exit_signals.append(momentum_signal)
                 max_urgency = max(max_urgency, momentum_signal['urgency'])
 
-            # 4. PROFIT PROTECTION (tiered based on gains)
+            # 4. PROFIT PROTECTION
             if avg_price:
                 profit_signal = self._check_profit_protection(current_gain, drop_from_high)
                 if profit_signal:
                     exit_signals.append(profit_signal)
                     max_urgency = max(max_urgency, profit_signal['urgency'])
 
-            # 5. TRAILING STOP (15% from peak)
+            # 5. TRAILING STOP
             trailing_signal = self._check_trailing_stop(recent_high, current_price)
             if trailing_signal:
                 exit_signals.append(trailing_signal)
                 max_urgency = max(max_urgency, trailing_signal['urgency'])
-
-            # 6. TECHNICAL BREAKDOWN
-            technical_signal = self._check_technical_breakdown(hist, current_price)
-            if technical_signal:
-                exit_signals.append(technical_signal)
-                max_urgency = max(max_urgency, technical_signal['urgency'])
 
             # Return signal if any triggered
             if exit_signals:
@@ -140,6 +243,7 @@ class PortfolioMonitor:
                     'urgency': max_urgency,
                     'recommendation': self._get_exit_recommendation(max_urgency),
                     'time_to_act': self._get_time_to_act(max_urgency),
+                    'market_hours': True,
                     'timestamp': datetime.now().isoformat()
                 }
 
@@ -149,19 +253,95 @@ class PortfolioMonitor:
             logger.error(f"Error analyzing exit for {symbol}: {e}")
             return None
 
+    async def _analyze_after_hours_exit(self, symbol: str, avg_price: Optional[float] = None,
+                                        quantity: float = 0) -> Optional[Dict[str, Any]]:
+        """Specialized exit analysis for after-hours trading"""
+        try:
+            # Get after-hours data
+            current_data = await self.after_hours_provider.get_after_hours_price(symbol)
+
+            if not current_data:
+                return {
+                    'symbol': symbol,
+                    'status': 'AFTER_HOURS_NO_DATA',
+                    'message': '🌙 After-hours - no extended trading data available',
+                    'urgency': 0,
+                    'after_hours': True,
+                    'note': 'Exit monitoring limited outside market hours'
+                }
+
+            current_price = current_data['price']
+            after_hours_change = current_data.get('change_percent', 0)
+            current_gain = ((current_price - avg_price) / avg_price * 100) if avg_price else 0
+
+            # More conservative thresholds for after-hours
+            signals = []
+            urgency = 0
+
+            if after_hours_change <= -15:  # 15% drop after-hours
+                urgency = 80
+                signals.append({
+                    'type': 'after_hours_drop',
+                    'message': f'📉 AFTER-HOURS DROP: Down {abs(after_hours_change):.1f}% after market close',
+                    'action': 'MONITOR CLOSELY - Consider exit at market open'
+                })
+
+            elif after_hours_change >= 100:  # 100% gain - possible squeeze
+                urgency = 30  # Lower urgency - might be opportunity
+                signals.append({
+                    'type': 'after_hours_surge',
+                    'message': f'🚀 AFTER-HOURS SURGE: Up {after_hours_change:.1f}% - POSSIBLE SQUEEZE!',
+                    'action': 'MONITOR - Do NOT sell during squeeze'
+                })
+
+            elif after_hours_change >= 50:  # 50% gain
+                urgency = 20
+                signals.append({
+                    'type': 'after_hours_gain',
+                    'message': f'📈 AFTER-HOURS GAIN: Up {after_hours_change:.1f}%',
+                    'action': 'POSITIVE - Monitor for continuation'
+                })
+
+            if signals:
+                position_value = current_price * quantity if quantity > 0 else 0
+
+                return {
+                    'symbol': symbol,
+                    'current_price': current_price,
+                    'regular_market_price': current_data.get('regular_price'),
+                    'after_hours_change': after_hours_change,
+                    'current_gain': current_gain,
+                    'avg_price': avg_price,
+                    'quantity': quantity,
+                    'position_value': position_value,
+                    'exit_signals': signals,
+                    'urgency': urgency,
+                    'after_hours': True,
+                    'recommendation': {
+                        'action': 'MONITOR' if urgency < 50 else 'PREPARE',
+                        'message': 'After-hours data - wait for market open for accurate signals'
+                    },
+                    'timestamp': datetime.now().isoformat(),
+                    'data_source': current_data.get('source', 'yahoo_after_hours')
+                }
+
+            return None
+
+        except Exception as e:
+            logger.error(f"After-hours exit analysis error for {symbol}: {e}")
+            return None
+
     def _check_volume_exhaustion(self, hist_data: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """Check for volume exhaustion with TIGHT threshold"""
         try:
-            volumes = hist_data['Volume'].tail(30)  # Last 30 minutes
+            volumes = hist_data['Volume'].tail(30)
 
             if len(volumes) < 10:
                 return None
 
             peak_volume = volumes.max()
             current_volume = volumes.iloc[-1]
-            recent_avg = volumes.tail(5).mean()
 
-            # TIGHTER threshold - 40% volume drop (not 70%)
             volume_decline = (peak_volume - current_volume) / peak_volume if peak_volume > 0 else 0
 
             if volume_decline >= self.exit_thresholds['volume_drop']:
@@ -181,18 +361,16 @@ class PortfolioMonitor:
     def _check_momentum_reversal(self, hist_data: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """Check for momentum reversal - early warning"""
         try:
-            closes = hist_data['Close'].tail(20)  # Last 20 minutes
+            closes = hist_data['Close'].tail(20)
 
             if len(closes) < 15:
                 return None
 
-            # Compare recent trend vs earlier trend
             recent_trend = closes.tail(5).mean()
             earlier_trend = closes.head(10).mean()
 
             momentum_change = (recent_trend - earlier_trend) / earlier_trend if earlier_trend > 0 else 0
 
-            # 5% momentum reversal (tight!)
             if momentum_change <= -self.exit_thresholds['momentum_loss']:
                 return {
                     'type': 'momentum_reversal',
@@ -209,7 +387,6 @@ class PortfolioMonitor:
     def _check_profit_protection(self, current_gain: float, drop_from_high: float) -> Optional[Dict[str, Any]]:
         """Protect profits with tiered approach"""
         try:
-            # Tiered profit protection
             for threshold in ['profit_protection_1', 'profit_protection_2', 'profit_protection_3']:
                 config = self.exit_thresholds[threshold]
 
@@ -250,60 +427,6 @@ class PortfolioMonitor:
 
         except Exception as e:
             logger.error(f"Trailing stop check error: {e}")
-
-        return None
-
-    def _check_technical_breakdown(self, hist_data: pd.DataFrame, current_price: float) -> Optional[Dict[str, Any]]:
-        """Check for technical breakdown patterns"""
-        try:
-            closes = hist_data['Close']
-            volumes = hist_data['Volume']
-
-            if len(closes) < 20:
-                return None
-
-            # Moving averages
-            ma_5 = closes.rolling(window=5).mean()
-            ma_10 = closes.rolling(window=10).mean()
-
-            if len(ma_5) < 5 or len(ma_10) < 10:
-                return None
-
-            current_ma5 = ma_5.iloc[-1]
-            current_ma10 = ma_10.iloc[-1]
-            prev_ma5 = ma_5.iloc[-2] if len(ma_5) > 1 else current_ma5
-
-            # Check for breakdown patterns
-            breakdown_signals = []
-
-            # 1. Price below MA5 and MA5 trending down
-            if current_price < current_ma5 and current_ma5 < prev_ma5:
-                breakdown_signals.append("Price below declining MA5")
-
-            # 2. MA5 crosses below MA10 (bearish crossover)
-            if current_ma5 < current_ma10 and ma_5.iloc[-2] >= ma_10.iloc[-2]:
-                breakdown_signals.append("Bearish MA crossover")
-
-            # 3. Volume spike on decline
-            if len(volumes) >= 5:
-                current_vol = volumes.iloc[-1]
-                avg_vol = volumes.tail(10).mean()
-                recent_change = (current_price - closes.iloc[-2]) / closes.iloc[-2] if len(closes) > 1 else 0
-
-                if current_vol > avg_vol * 2 and recent_change < -0.02:  # 2x volume + 2% drop
-                    breakdown_signals.append("High volume selling")
-
-            if breakdown_signals:
-                return {
-                    'type': 'technical_breakdown',
-                    'message': f'📊 TECHNICAL BREAKDOWN: {", ".join(breakdown_signals)}',
-                    'urgency': 75,
-                    'action': 'TECHNICAL SELL SIGNAL',
-                    'signals': breakdown_signals
-                }
-
-        except Exception as e:
-            logger.error(f"Technical breakdown check error: {e}")
 
         return None
 
@@ -365,7 +488,6 @@ class PortfolioMonitor:
                 self.price_history[symbol] = deque(maxlen=100)
                 self.volume_history[symbol] = deque(maxlen=100)
 
-            # Add recent data points
             recent_closes = hist_data['Close'].tail(10).tolist()
             recent_volumes = hist_data['Volume'].tail(10).tolist()
 
@@ -375,73 +497,6 @@ class PortfolioMonitor:
         except Exception as e:
             logger.error(f"Error updating history for {symbol}: {e}")
 
-    def get_portfolio_risk_summary(self, exit_signals: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Generate portfolio-wide risk summary"""
-        try:
-            if not exit_signals:
-                return {
-                    'overall_risk': 'LOW',
-                    'critical_positions': 0,
-                    'high_risk_positions': 0,
-                    'total_positions_at_risk': 0,
-                    'message': '✅ Portfolio looking healthy'
-                }
-
-            critical_count = sum(1 for s in exit_signals if s.get('urgency', 0) >= 90)
-            high_risk_count = sum(1 for s in exit_signals if s.get('urgency', 0) >= 80)
-            total_at_risk = len(exit_signals)
-
-            if critical_count > 0:
-                overall_risk = 'CRITICAL'
-                message = f'🚨 {critical_count} positions need immediate exit'
-            elif high_risk_count > 0:
-                overall_risk = 'HIGH'
-                message = f'🔴 {high_risk_count} positions should be sold soon'
-            elif total_at_risk >= 3:
-                overall_risk = 'MEDIUM'
-                message = f'🟡 Multiple positions showing exit signals'
-            else:
-                overall_risk = 'LOW'
-                message = f'🟢 Few positions with minor exit signals'
-
-            return {
-                'overall_risk': overall_risk,
-                'critical_positions': critical_count,
-                'high_risk_positions': high_risk_count,
-                'total_positions_at_risk': total_at_risk,
-                'message': message,
-                'top_risks': sorted(exit_signals, key=lambda x: x.get('urgency', 0), reverse=True)[:3]
-            }
-
-        except Exception as e:
-            logger.error(f"Error generating risk summary: {e}")
-            return {
-                'overall_risk': 'UNKNOWN',
-                'message': 'Error calculating portfolio risk'
-            }
-
-    async def monitor_position_realtime(self, symbol: str, entry_price: float,
-                                        stop_loss_percent: float = 15) -> Dict[str, Any]:
-        """Real-time monitoring of a specific position"""
-        try:
-            current_data = await self.analyze_stock_exit(symbol, entry_price)
-
-            if not current_data:
-                return {
-                    'symbol': symbol,
-                    'status': 'MONITORING',
-                    'message': 'Position being monitored - no exit signals'
-                }
-
-            # Add real-time context
-            current_data['entry_price'] = entry_price
-            current_data['stop_loss_level'] = entry_price * (1 - stop_loss_percent / 100)
-            current_data['profit_target_1'] = entry_price * 1.25  # 25% profit
-            current_data['profit_target_2'] = entry_price * 1.50  # 50% profit
-            current_data['profit_target_3'] = entry_price * 2.00  # 100% profit
-
-            return current_data
-
-        except Exception as e:
-            logger.error(f"Error monitoring position {symbol}: {e}")
-            return {'error': str(e)}
+    async def close_sessions(self):
+        """Close all async sessions"""
+        await self.after_hours_provider.close_session()

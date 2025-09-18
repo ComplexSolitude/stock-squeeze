@@ -88,7 +88,49 @@ async def health_check():
     }
 
 
-# Stock Data Endpoints
+# 1. SEARCH ENDPOINT FIRST (specific route)
+@app.get("/api/stock/search")
+async def search_stocks(q: str):
+    """Search for stocks by symbol or name - DEBUG VERSION"""
+    try:
+        logger.info(f"🔍 Starting search for: '{q}'")
+
+        # Test if stock_fetcher exists
+        if not stock_fetcher:
+            logger.error("❌ stock_fetcher is None!")
+            raise Exception("Stock fetcher not initialized")
+
+        logger.info("✅ stock_fetcher exists")
+
+        # Check if search_stocks method exists
+        if not hasattr(stock_fetcher, 'search_stocks'):
+            logger.error("❌ search_stocks method missing!")
+            raise Exception("search_stocks method not found")
+
+        logger.info("✅ search_stocks method exists")
+
+        # Try the actual search
+        logger.info("🔄 Calling search_stocks...")
+        results = await stock_fetcher.search_stocks(q)
+
+        logger.info(f"✅ Search completed - found {len(results)} results")
+        return {"results": results}
+
+    except Exception as e:
+        logger.error(f"❌ Search failed for '{q}': {str(e)}")
+        logger.exception("Full error traceback:")
+
+        # Return a simple fallback instead of 500 error
+        return {
+            "results": [
+                {"symbol": "AAPL", "name": "Apple Inc.", "type": "EQUITY", "exchange": "NASDAQ"},
+                {"symbol": "TSLA", "name": "Tesla, Inc.", "type": "EQUITY", "exchange": "NASDAQ"}
+            ],
+            "error": str(e),
+            "fallback": True
+        }
+
+# 2. INDIVIDUAL STOCK ENDPOINT SECOND (parameterized route)
 @app.get("/api/stock/{symbol}")
 async def get_stock_data(symbol: str):
     """Get current stock data for a symbol"""
@@ -101,18 +143,6 @@ async def get_stock_data(symbol: str):
     except Exception as e:
         logger.error(f"Error fetching stock data for {symbol}: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch stock data")
-
-
-@app.post("/api/stock/search")
-async def search_stocks(query: str):
-    """Search for stocks by symbol or name"""
-    try:
-        results = await stock_fetcher.search_stocks(query)
-        return {"results": results}
-    except Exception as e:
-        logger.error(f"Error searching stocks: {e}")
-        raise HTTPException(status_code=500, detail="Failed to search stocks")
-
 
 @app.get("/api/stock/{symbol}/squeeze-analysis")
 async def get_squeeze_analysis(symbol: str):
@@ -221,6 +251,35 @@ async def get_stock_exit_signals(symbol: str):
         raise HTTPException(status_code=500, detail="Failed to get exit signals")
 
 
+@app.delete("/api/exit-signals/clear")
+async def clear_exit_signals():
+    """Clear all exit signals from Firebase"""
+    try:
+        # Get all exit signals
+        if firebase_client.db:
+            exit_ref = firebase_client.db.collection('exit_signals')
+            docs = exit_ref.stream()
+
+            # Delete all documents
+            batch = firebase_client.db.batch()
+            count = 0
+            for doc in docs:
+                batch.delete(doc.reference)
+                count += 1
+
+            if count > 0:
+                batch.commit()
+                logger.info(f"Cleared {count} exit signals")
+
+            return {"message": f"Cleared {count} exit signals", "success": True}
+        else:
+            return {"message": "Firebase not available", "success": False}
+
+    except Exception as e:
+        logger.error(f"Error clearing exit signals: {e}")
+        return {"error": str(e), "success": False}
+
+
 # Background Tasks
 @app.on_event("startup")
 async def startup_event():
@@ -236,17 +295,29 @@ async def startup_event():
 
 
 async def background_portfolio_monitor():
-    """Monitor portfolio for exit signals every 15 seconds"""
+    """Monitor portfolio for exit signals - respects market hours"""
     while True:
         try:
-            logger.info("Running portfolio exit monitoring...")
+            # Check if market is open first
+            monitor = PortfolioMonitor()
+
+            if not monitor.is_market_hours():
+                logger.info("📴 Market closed - portfolio monitoring paused")
+                await asyncio.sleep(300)  # Wait 5 minutes during off-hours
+                continue
+
+            logger.info("📊 Running portfolio exit monitoring (market hours)...")
 
             # Get portfolio
             portfolio = await firebase_client.get_portfolio()
 
             # Check each stock for exit signals
             for stock in portfolio:
-                exit_signals = await portfolio_monitor.analyze_stock_exit(stock['symbol'])
+                exit_signals = await monitor.analyze_stock_exit(
+                    stock['symbol'],
+                    stock.get('avg_price'),
+                    stock.get('quantity', 0)
+                )
 
                 if exit_signals and exit_signals.get('urgency', 0) >= 50:
                     # Store in Firebase
@@ -254,14 +325,17 @@ async def background_portfolio_monitor():
 
                     # Send critical alerts
                     if exit_signals.get('urgency', 0) >= 85:
-                        logger.warning(f"CRITICAL EXIT SIGNAL: {stock['symbol']} - Urgency: {exit_signals['urgency']}")
+                        logger.warning(
+                            f"🚨 CRITICAL EXIT SIGNAL: {stock['symbol']} - Urgency: {exit_signals['urgency']}")
 
-            logger.info("Portfolio monitoring completed")
+            logger.info("✅ Portfolio monitoring completed")
+            await monitor.close_sessions()
 
         except Exception as e:
-            logger.error(f"Error in portfolio monitoring: {e}")
+            logger.error(f"❌ Error in portfolio monitoring: {e}")
 
-        # Wait 15 seconds
+        # During market hours: check every 15 seconds
+        # After hours: check every 5 minutes
         await asyncio.sleep(15)
 
 

@@ -196,6 +196,14 @@ function closeAddStockModal() {
     document.getElementById('stock-search').value = '';
 }
 
+// Replace the searchStocks function in app.js with this:
+
+// Temporarily update searchStocks in app.js to use the test endpoint:
+
+// Update searchStocks in app.js back to the real endpoint:
+
+// Final working version of searchStocks in app.js:
+
 let searchTimeout;
 async function searchStocks(query) {
     if (searchTimeout) clearTimeout(searchTimeout);
@@ -207,19 +215,39 @@ async function searchStocks(query) {
 
     searchTimeout = setTimeout(async () => {
         try {
-            // Call backend API for stock search
-            const response = await apiRequest(`/api/stock/search`, {
-                method: 'POST',
-                body: JSON.stringify(query)
+            console.log(`🔍 Searching for: "${query}"`);
+
+            const response = await apiRequest(`/api/stock/search?q=${encodeURIComponent(query)}`, {
+                method: 'GET'
             });
+
+            console.log('✅ Search successful:', response);
+
+            if (response.fallback) {
+                console.warn('⚠️ Using fallback results:', response.error);
+                showNotification('Search using fallback data', 'warning');
+            }
 
             renderSearchResults(response.results || []);
 
         } catch (error) {
-            console.error('Search error:', error);
+            console.error('❌ Search failed:', error);
+
             document.getElementById('search-results').innerHTML = `
                 <div style="padding: 20px; text-align: center; color: #666;">
-                    Error searching stocks. Please try again.
+                    <strong>Search temporarily unavailable</strong><br>
+                    <small>Please try again in a moment</small>
+                    <br><br>
+                    <button onclick="searchStocks('${query}')" style="
+                        padding: 8px 16px; 
+                        background: var(--primary); 
+                        color: white; 
+                        border: none; 
+                        border-radius: 6px; 
+                        cursor: pointer;
+                    ">
+                        Retry Search
+                    </button>
                 </div>
             `;
         }
@@ -411,30 +439,43 @@ async function manualSqueezeScan() {
     }
 }
 
-// Sell Signals
 function loadSellSignals() {
     const sellSignalsContainer = document.getElementById('sell-signals');
     sellSignalsContainer.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
 
-    // Load from Firebase with real-time updates
-    db.collection('exit_signals')
-      .orderBy('urgency', 'desc')
-      .onSnapshot((snapshot) => {
-          sellSignals = [];
-          snapshot.forEach((doc) => {
-              sellSignals.push({ id: doc.id, ...doc.data() });
-          });
+    // TEMPORARILY DISABLED: Load from API instead of Firebase to avoid cached data
+    // Load from backend API instead
+    apiRequest('/api/exit-signals', { method: 'GET' })
+        .then(response => {
+            sellSignals = response.exit_signals || [];
+            console.log('📊 Loaded exit signals from API:', sellSignals);
+            renderSellSignals();
+        })
+        .catch(error => {
+            console.error('Error loading sell signals from API:', error);
+            // Force empty signals to prevent false alerts
+            sellSignals = [];
+            renderSellSignals();
+        });
 
-          renderSellSignals();
-      }, (error) => {
-          console.error('Error loading sell signals:', error);
-          sellSignalsContainer.innerHTML = `
-              <div class="empty-state">
-                  <h3>Error loading exit signals</h3>
-                  <p>Please check your connection</p>
-              </div>
-          `;
-      });
+    // OLD Firebase code (commented out to prevent cached data):
+    // db.collection('exit_signals')
+    //   .orderBy('urgency', 'desc')
+    //   .onSnapshot((snapshot) => {
+    //       sellSignals = [];
+    //       snapshot.forEach((doc) => {
+    //           sellSignals.push({ id: doc.id, ...doc.data() });
+    //       });
+    //       renderSellSignals();
+    //   }, (error) => {
+    //       console.error('Error loading sell signals:', error);
+    //       sellSignalsContainer.innerHTML = `
+    //           <div class="empty-state">
+    //               <h3>Error loading exit signals</h3>
+    //               <p>Please check your connection</p>
+    //           </div>
+    //       `;
+    //   });
 }
 
 function renderSellSignals() {
@@ -648,4 +689,16 @@ async function checkBackendHealth() {
         console.error('Backend health check failed:', error);
         showNotification('Backend connection failed - using offline mode', 'error');
     }
+}
+
+// Add this function to clear cached Firebase data
+function clearCachedData() {
+    // Clear local arrays
+    sellSignals = [];
+
+    // Force reload
+    renderSellSignals();
+
+    console.log('🧹 Cleared cached exit signals');
+    showNotification('Cached data cleared', 'success');
 }
