@@ -60,6 +60,44 @@ body {
     box-shadow: var(--glass-shadow);
 }
 
+/* Desktop responsiveness */
+@media (min-width: 768px) {
+    .app-container {
+        max-width: 900px;
+        border-radius: 24px;
+        margin: 20px auto;
+        min-height: calc(100vh - 40px);
+    }
+
+    .tab-content {
+        padding: 40px 30px;
+    }
+
+    .portfolio-header h2 {
+        font-size: 28px;
+    }
+
+    .stock-card, .signal-card, .squeeze-alert {
+        padding: 25px;
+    }
+}
+
+@media (min-width: 1200px) {
+    .app-container {
+        max-width: 1200px;
+    }
+
+    .tab-content {
+        padding: 40px;
+    }
+
+    /* Two-column layout for large screens */
+    .stock-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+        gap: 20px;
+    }
+}
 /* Header */
 .header {
     background: var(--gradient-main);

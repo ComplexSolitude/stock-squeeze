@@ -158,6 +158,8 @@ function renderPortfolio() {
         `;
         return;
     }
+    // Add grid class for desktop layout
+    portfolioList.className = portfolioStocks.length > 1 ? 'stock-grid' : '';
 
     portfolioList.innerHTML = portfolioStocks.map(stock => {
         // Find exit signal for this stock
