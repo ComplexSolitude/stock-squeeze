@@ -17,7 +17,26 @@ const db = firebase.firestore();
 // API Configuration
 const API_BASE_URL = window.location.hostname === 'localhost'
     ? 'http://localhost:8000'  // Development
-    : 'https://your-backend-url.com';  // Production
+    : 'https://squeeze-tracker-api.onrender.com';  // Replace with YOUR actual Render URL
+
+// Alternative: Auto-detect your Render URL
+const API_BASE_URL = window.location.hostname === 'localhost'
+    ? 'http://localhost:8000'  // Development
+    : window.location.hostname.includes('netlify')
+        ? 'https://squeeze-tracker-api.onrender.com'  // When deployed on Netlify
+        : 'https://squeeze-tracker-api.onrender.com';  // Default production
+
+// Or even better - use environment detection:
+const API_BASE_URL = (() => {
+    const hostname = window.location.hostname;
+
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+        return 'http://localhost:8000';  // Local development
+    }
+
+    // Production - replace with your actual Render URL
+    return 'https://squeeze-tracker-api.onrender.com';
+})();
 
 // App State
 let portfolioStocks = [];
