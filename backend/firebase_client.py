@@ -19,29 +19,69 @@ class FirebaseClient:
         try:
             # Check if Firebase is already initialized
             if not firebase_admin._apps:
-                # Try to get credentials from environment or file
-                cred_path = "firebase-key.json"  # Your actual filename
-                if os.path.exists(cred_path):
-                    # Use service account file
-                    cred = credentials.Certificate(cred_path)
-                    firebase_admin.initialize_app(cred)
+                cred = None
+
+                # Method 1: Try environment variables (for Render/Railway)
+                if self._has_env_credentials():
+                    logger.info("Using Firebase credentials from environment variables")
+                    cred = credentials.Certificate(self._get_credentials_from_env())
+
+                # Method 2: Try service account file (for local development)
+                elif os.path.exists("firebase-key.json"):
+                    logger.info("Using Firebase credentials from file")
+                    cred = credentials.Certificate("firebase-key.json")
+
+                # Method 3: Try default credentials (for Google Cloud)
                 else:
-                    # Use default credentials (for Google Cloud deployment)
                     try:
+                        logger.info("Trying Firebase default credentials")
                         cred = credentials.ApplicationDefault()
-                        firebase_admin.initialize_app(cred)
                     except Exception as e:
                         logger.warning(f"Could not initialize Firebase with default credentials: {e}")
-                        # For development, create a mock client
                         logger.info("Running in development mode without Firebase")
                         return
 
+                firebase_admin.initialize_app(cred)
+
             self.db = firestore.client()
-            logger.info("Firebase initialized successfully")
+            logger.info("✅ Firebase initialized successfully")
 
         except Exception as e:
-            logger.error(f"Error initializing Firebase: {e}")
+            logger.error(f"❌ Error initializing Firebase: {e}")
             logger.info("Running in development mode without Firebase")
+
+    def _has_env_credentials(self) -> bool:
+        """Check if all required Firebase env vars are present"""
+        required_vars = [
+            'FIREBASE_TYPE',
+            'FIREBASE_PROJECT_ID',
+            'FIREBASE_PRIVATE_KEY_ID',
+            'FIREBASE_PRIVATE_KEY',
+            'FIREBASE_CLIENT_EMAIL',
+            'FIREBASE_CLIENT_ID',
+            'FIREBASE_CLIENT_X509_CERT_URL'
+        ]
+
+        return all(os.environ.get(var) for var in required_vars)
+
+    def _get_credentials_from_env(self) -> Dict[str, str]:
+        """Build Firebase credentials dict from environment variables"""
+        # Fix private key formatting (Render/Railway escapes newlines)
+        private_key = os.environ.get('FIREBASE_PRIVATE_KEY', '')
+        private_key = private_key.replace('\\n', '\n')
+
+        return {
+            "type": os.environ.get('FIREBASE_TYPE', 'service_account'),
+            "project_id": os.environ.get('FIREBASE_PROJECT_ID'),
+            "private_key_id": os.environ.get('FIREBASE_PRIVATE_KEY_ID'),
+            "private_key": private_key,
+            "client_email": os.environ.get('FIREBASE_CLIENT_EMAIL'),
+            "client_id": os.environ.get('FIREBASE_CLIENT_ID'),
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_x509_cert_url": os.environ.get('FIREBASE_CLIENT_X509_CERT_URL')
+        }
 
     async def get_portfolio(self) -> List[Dict[str, Any]]:
         """Get user's portfolio from Firestore"""
@@ -288,132 +328,6 @@ class FirebaseClient:
 
         except Exception as e:
             logger.error(f"Error cleaning up old data: {e}")
-            return False
-
-    async def store_trading_halt(self, halt_data: Dict[str, Any]) -> bool:
-        """Store trading halt information"""
-        if not self.db:
-            return False
-
-        try:
-            halt_ref = self.db.collection('trading_halts')
-
-            # Use symbol and halt time as unique ID
-            symbol = halt_data['symbol']
-            halt_time = halt_data.get('halt_time', datetime.now().isoformat())
-            doc_id = f"{symbol}_{halt_time.replace(':', '_').replace(' ', '_')}"
-
-            halt_data['stored_at'] = datetime.now()
-            halt_data['expires_at'] = datetime.now() + timedelta(hours=24)  # Keep for 24 hours
-
-            doc_ref = halt_ref.document(doc_id)
-            doc_ref.set(halt_data)
-
-            logger.info(f"Stored trading halt for {symbol}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error storing trading halt: {e}")
-            return False
-
-    async def get_trading_halts(self, hours_back: int = 24) -> List[Dict[str, Any]]:
-        """Get recent trading halts"""
-        if not self.db:
-            return []
-
-        try:
-            halt_ref = self.db.collection('trading_halts')
-
-            cutoff_time = datetime.now() - timedelta(hours=hours_back)
-            query = halt_ref.where('stored_at', '>=', cutoff_time) \
-                .order_by('stored_at', direction=firestore.Query.DESCENDING)
-
-            docs = query.stream()
-            halts = []
-
-            for doc in docs:
-                data = doc.to_dict()
-                data['id'] = doc.id
-                halts.append(data)
-
-            return halts
-
-        except Exception as e:
-            logger.error(f"Error getting trading halts: {e}")
-            return []
-
-    async def store_user_settings(self, user_id: str, settings: Dict[str, Any]) -> bool:
-        """Store user-specific settings"""
-        if not self.db:
-            return False
-
-        try:
-            settings_ref = self.db.collection('user_settings')
-            doc_ref = settings_ref.document(user_id)
-
-            settings['updated_at'] = datetime.now()
-            doc_ref.set(settings, merge=True)
-
-            return True
-
-        except Exception as e:
-            logger.error(f"Error storing user settings: {e}")
-            return False
-
-    async def get_user_settings(self, user_id: str) -> Dict[str, Any]:
-        """Get user-specific settings"""
-        if not self.db:
-            return {}
-
-        try:
-            settings_ref = self.db.collection('user_settings')
-            doc_ref = settings_ref.document(user_id)
-            doc = doc_ref.get()
-
-            if doc.exists:
-                return doc.to_dict()
-            else:
-                # Return default settings
-                return {
-                    'exit_thresholds': {
-                        'quick_drop': 8,
-                        'trailing_stop': 15,
-                        'volume_exhaustion': 60
-                    },
-                    'notifications': {
-                        'critical_exits': True,
-                        'squeeze_opportunities': True,
-                        'portfolio_updates': False
-                    },
-                    'risk_level': 'balanced'
-                }
-
-        except Exception as e:
-            logger.error(f"Error getting user settings: {e}")
-            return {}
-
-    async def log_user_action(self, user_id: str, action: str, data: Dict[str, Any]) -> bool:
-        """Log user actions for analytics"""
-        if not self.db:
-            return False
-
-        try:
-            log_ref = self.db.collection('user_actions')
-
-            log_entry = {
-                'user_id': user_id,
-                'action': action,
-                'data': data,
-                'timestamp': datetime.now(),
-                'ip_address': data.get('ip_address'),
-                'user_agent': data.get('user_agent')
-            }
-
-            log_ref.add(log_entry)
-            return True
-
-        except Exception as e:
-            logger.error(f"Error logging user action: {e}")
             return False
 
     def get_health_status(self) -> Dict[str, Any]:

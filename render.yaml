@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: squeeze-tracker-api
+    env: python
+    region: oregon  # or frankfurt for EU
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHONPATH
+        value: /opt/render/project/src
+      - key: FIREBASE_PROJECT_ID
+        sync: false  # We'll set this manually
+      - key: FIREBASE_TYPE
+        value: service_account
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+      - key: FIREBASE_CLIENT_ID
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY_ID
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false
+      - key: FIREBASE_CLIENT_X509_CERT_URL
+        sync: false
